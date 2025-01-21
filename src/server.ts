@@ -36,11 +36,20 @@ const wss = new WebSocketServer({ server });
 wss.on("connection", (ws) => {
     console.log("Client connected!");
 
-    // Handle incoming messages from clients
+    // Handle incoming messages from clients not really doing it this way right now
+    // publishing straight to redis and using the subs below
     ws.on("message", (message) => {
-        console.log(`Received: ${message}`);
-        // Publish the message to Redis
-        redisPub.publish("annotations", message.toString());
+        const parsedMessage = JSON.parse(message.toString());
+        if (parsedMessage.channel == 'annotation') {
+            console.log(`Received annotation: ${message}`);
+            // Publish the message to Redis
+            redisPub.publish("annotations", message.toString());
+        }
+        else if (parsedMessage.channel == 'bookmark') {
+            console.log(`Received bookmark: ${message}`);
+            // Publish the message to Redis
+            redisPub.publish("bookmarks", message.toString());
+        }
     });
 
     ws.on("close", () => {
@@ -50,12 +59,14 @@ wss.on("connection", (ws) => {
 
 // Subscribe to Redis
 redisSub.subscribe("annotations");
+redisSub.subscribe("bookmarks");
+
 redisSub.on("message", (channel, message) => {
-    console.log(`Received from Redis: ${message}`);
+    console.log(`Message from Redis on channel '${channel}': ${message}`);
     // Broadcast the message to all WebSocket clients
     wss.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
+            client.send(JSON.stringify({ channel, data: message }));
         }
     });
 });
