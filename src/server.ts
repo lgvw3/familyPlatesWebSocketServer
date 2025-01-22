@@ -60,6 +60,8 @@ wss.on("connection", (ws) => {
 // Subscribe to Redis
 redisSub.subscribe("annotations");
 redisSub.subscribe("bookmarks");
+redisSub.subscribe("comments");
+redisSub.subscribe("likes")
 
 redisSub.on("message", (channel, message) => {
     console.log(`Message from Redis on channel '${channel}': ${message}`);
