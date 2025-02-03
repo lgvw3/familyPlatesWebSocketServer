@@ -3,9 +3,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import * as dotenv from 'dotenv'
 import * as http from "http";
 import { createClient } from 'redis';
-import * as crypto from 'crypto'
-import * as cookie from 'cookie'
-
+import * as url from 'url'
 
 // Load environment variables from `.env.local`
 dotenv.config({ path: ".env.local" });
@@ -51,29 +49,11 @@ const redisSub = new Redis(process.env.KV_URL ?? '');
 // WebSocket server
 const wss = new WebSocketServer({ server });
 
-function validateToken(token: string): { userId: number | null } {
-    const secret = process.env.SECRET_KEY || 'super-secret-key';
-    const [userId, hash] = token.split(':');
-  
-    const validHash = crypto.createHmac('sha256', secret).update(userId).digest('hex');
-    if (hash === validHash) {
-        return { userId: parseInt(userId, 10) };
-    }
-  
-    return { userId: null };
-}
-
 wss.on("connection", async (ws, request) => {
     console.log("Client connected!");
-    console.log('WebSocket Connection Headers:', request.headers);
-
-    const cookies = request.headers.cookie;
-    console.log('Received Cookies:', cookies);
-
-    const c = cookie.parse(request.headers.cookie ?? '')
-    console.log(c)
     
-    const userId = validateToken(c.familyPlatesAuthToken ?? '').userId
+    const query = url.parse(request.url ?? '', true).query;
+    const userId = query.userId;
 
     if (!userId) {
         console.log('No user ID found in cookies');
