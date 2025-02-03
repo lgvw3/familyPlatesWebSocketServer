@@ -65,6 +65,10 @@ function validateToken(token: string): { userId: number | null } {
 
 wss.on("connection", async (ws, request) => {
     console.log("Client connected!");
+    console.log('WebSocket Connection Headers:', request.headers);
+
+    const cookies = request.headers.cookie;
+    console.log('Received Cookies:', cookies);
 
     const c = cookie.parse(request.headers.cookie ?? '')
     console.log(c)
