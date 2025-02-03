@@ -67,6 +67,7 @@ wss.on("connection", async (ws, request) => {
     console.log("Client connected!");
 
     const c = cookie.parse(request.headers.cookie ?? '')
+    console.log(c)
     
     const userId = validateToken(c.familyPlatesAuthToken ?? '').userId
 
