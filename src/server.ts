@@ -2,6 +2,9 @@ import Redis from "ioredis";
 import { WebSocket, WebSocketServer } from "ws";
 import * as dotenv from 'dotenv'
 import * as http from "http";
+import { createClient } from 'redis';
+import * as crypto from 'crypto'
+import * as cookie from 'cookie'
 
 
 // Load environment variables from `.env.local`
@@ -26,6 +29,21 @@ server.listen(PORT, () => {
     console.log(`Health check available at http://localhost:${PORT}/health`);
 });
 
+const redis = createClient({
+    url: process.env.KV_URL
+});
+
+async function initializeRedis() {
+    try {
+        await redis.connect();
+        console.log('Redis connected');
+    } catch (error) {
+        console.error('Redis connection failed:', error);
+    }
+}
+
+initializeRedis();
+
 // Redis setup
 const redisPub = new Redis(process.env.KV_URL ?? '');
 const redisSub = new Redis(process.env.KV_URL ?? '');
@@ -33,8 +51,44 @@ const redisSub = new Redis(process.env.KV_URL ?? '');
 // WebSocket server
 const wss = new WebSocketServer({ server });
 
-wss.on("connection", (ws) => {
+function validateToken(token: string): { userId: number | null } {
+    const secret = process.env.SECRET_KEY || 'super-secret-key';
+    const [userId, hash] = token.split(':');
+  
+    const validHash = crypto.createHmac('sha256', secret).update(userId).digest('hex');
+    if (hash === validHash) {
+        return { userId: parseInt(userId, 10) };
+    }
+  
+    return { userId: null };
+}
+
+wss.on("connection", async (ws, request) => {
     console.log("Client connected!");
+
+    const c = cookie.parse(request.headers.cookie ?? '')
+    
+    const userId = validateToken(c.familyPlatesAuthToken ?? '').userId
+
+    if (!userId) {
+        console.log('No user ID found in cookies');
+        ws.close();
+        return;
+    }
+    else {
+        console.log(userId)
+    }
+
+    // Mark user online in Redis with 60-second TTL (will auto-expire if no heartbeat)
+    await redis.set(`online:${userId}`, Date.now().toString(), {
+        EX: 60 // Expire in 60 seconds
+    });
+
+    setInterval(async () => {
+        await redis.set(`online:${userId}`, Date.now().toString(), {
+            EX: 60 // Expire in 60 seconds
+        });
+    }, 30000);
 
     // Handle incoming messages from clients not really doing it this way right now
     // publishing straight to redis and using the subs below
@@ -52,8 +106,9 @@ wss.on("connection", (ws) => {
         }
     });
 
-    ws.on("close", () => {
+    ws.on("close", async () => {
         console.log("Client disconnected!");
+        await redis.del(`online:${userId}`);
     });
 });
 
