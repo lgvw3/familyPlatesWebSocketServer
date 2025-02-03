@@ -84,7 +84,7 @@ wss.on("connection", async (ws, request) => {
         EX: 60 // Expire in 60 seconds
     });
 
-    setInterval(async () => {
+    const heartbeat = setInterval(async () => {
         await redis.set(`online:${userId}`, Date.now().toString(), {
             EX: 60 // Expire in 60 seconds
         });
@@ -109,6 +109,7 @@ wss.on("connection", async (ws, request) => {
     ws.on("close", async () => {
         console.log("Client disconnected!");
         await redis.del(`online:${userId}`);
+        clearInterval(heartbeat)
     });
 });
 
