@@ -5,11 +5,20 @@ import * as http from "http";
 import { createClient } from 'redis';
 import * as url from 'url'
 import { verifyRealtimeTicket } from './realtime-auth';
+import {
+    BASE_CHANNELS,
+    namespacedChannel,
+    parseAllowedNamespaces,
+    parseRedisChannel,
+    presenceKey,
+} from './realtime-routing';
 
 // Load environment variables from `.env.local`
 dotenv.config({ path: ".env.local" });
 
 const PORT = process.env.PORT || 8080;
+const namespaceValues = parseAllowedNamespaces(process.env.REALTIME_NAMESPACES);
+const allowedNamespaces = new Set(namespaceValues);
 
 // Create an HTTP server
 const server = http.createServer((req, res) => {
@@ -64,35 +73,38 @@ const redisSub = new Redis(process.env.KV_URL ?? '');
 // Authenticate the HTTP upgrade before ws accepts it. The verified identity is
 // attached to the request; a client-supplied userId is never trusted.
 const wss = new WebSocketServer({ noServer: true });
-const authenticatedRequests = new WeakMap<http.IncomingMessage, number>();
+const authenticatedRequests = new WeakMap<http.IncomingMessage, { userId: number; namespace: string }>();
+const clientNamespaces = new WeakMap<WebSocket, string>();
 
 server.on('upgrade', (request, socket, head) => {
     const query = url.parse(request.url ?? '', true).query;
     const ticket = Array.isArray(query.ticket) ? query.ticket[0] : query.ticket;
-    const payload = verifyRealtimeTicket(ticket, process.env.REALTIME_AUTH_SECRET);
+    const payload = verifyRealtimeTicket(ticket, process.env.REALTIME_AUTH_SECRET, allowedNamespaces);
     if (!payload) {
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
         socket.destroy();
         return;
     }
-    authenticatedRequests.set(request, payload.userId);
+    authenticatedRequests.set(request, payload);
     wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
 });
 
 wss.on("connection", async (ws, request) => {
     console.log("Client connected!");
 
-    const userId = authenticatedRequests.get(request);
-    if (!userId) return ws.close();
-    console.log(`Authenticated client ${userId}`);
+    const identity = authenticatedRequests.get(request);
+    if (!identity) return ws.close();
+    const { userId, namespace } = identity;
+    clientNamespaces.set(ws, namespace);
+    console.log(`Authenticated client ${userId} in ${namespace}`);
 
     // Mark user online in Redis with 60-second TTL (will auto-expire if no heartbeat)
-    await redis.set(`online:${userId}`, Date.now().toString(), {
+    await redis.set(presenceKey(namespace, userId), Date.now().toString(), {
         EX: 60 // Expire in 60 seconds
     });
 
     const heartbeat = setInterval(async () => {
-        await redis.set(`online:${userId}`, Date.now().toString(), {
+        await redis.set(presenceKey(namespace, userId), Date.now().toString(), {
             EX: 60 // Expire in 60 seconds
         });
     }, 30000);
@@ -104,36 +116,37 @@ wss.on("connection", async (ws, request) => {
         if (parsedMessage.channel == 'annotation') {
             console.log(`Received annotation: ${message}`);
             // Publish the message to Redis
-            redisPub.publish("annotations", message.toString());
+            redisPub.publish(namespacedChannel(namespace, "annotations"), message.toString());
         }
         else if (parsedMessage.channel == 'bookmark') {
             console.log(`Received bookmark: ${message}`);
             // Publish the message to Redis
-            redisPub.publish("bookmarks", message.toString());
+            redisPub.publish(namespacedChannel(namespace, "bookmarks"), message.toString());
         }
     });
 
     ws.on("close", async () => {
         console.log("Client disconnected!");
-        await redis.del(`online:${userId}`);
+        await redis.del(presenceKey(namespace, userId));
         clearInterval(heartbeat)
     });
 });
 
-// Subscribe to Redis
-redisSub.subscribe("annotations");
-redisSub.subscribe("annotationUpdates");
-redisSub.subscribe("bookmarks");
-redisSub.subscribe("comments");
-redisSub.subscribe("likes")
-redisSub.subscribe("commentLikes")
+// Subscribe to namespaced channels, plus legacy unprefixed channels as main
+// for one compatibility release.
+const namespacedChannels = namespaceValues.flatMap(namespace =>
+    BASE_CHANNELS.map(channel => namespacedChannel(namespace, channel)),
+);
+redisSub.subscribe(...namespacedChannels, ...BASE_CHANNELS);
 
-redisSub.on("message", (channel, message) => {
-    console.log(`Message from Redis on channel '${channel}': ${message}`);
+redisSub.on("message", (receivedChannel, message) => {
+    const routed = parseRedisChannel(receivedChannel, allowedNamespaces);
+    if (!routed) return;
+    console.log(`Message from Redis on channel '${receivedChannel}'`);
     // Broadcast the message to all WebSocket clients
     wss.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ channel, data: message }));
+        if (client.readyState === WebSocket.OPEN && clientNamespaces.get(client) === routed.namespace) {
+            client.send(JSON.stringify({ channel: routed.channel, data: message }));
         }
     });
 });
