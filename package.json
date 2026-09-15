@@ -4,7 +4,8 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "npm run build && node --test dist/realtime-auth.test.js"
   },
   "keywords": [],
   "author": "",

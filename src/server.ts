@@ -4,6 +4,7 @@ import * as dotenv from 'dotenv'
 import * as http from "http";
 import { createClient } from 'redis';
 import * as url from 'url'
+import { verifyRealtimeTicket } from './realtime-auth';
 
 // Load environment variables from `.env.local`
 dotenv.config({ path: ".env.local" });
@@ -60,23 +61,30 @@ initializeRedis();
 const redisPub = new Redis(process.env.KV_URL ?? '');
 const redisSub = new Redis(process.env.KV_URL ?? '');
 
-// WebSocket server
-const wss = new WebSocketServer({ server });
+// Authenticate the HTTP upgrade before ws accepts it. The verified identity is
+// attached to the request; a client-supplied userId is never trusted.
+const wss = new WebSocketServer({ noServer: true });
+const authenticatedRequests = new WeakMap<http.IncomingMessage, number>();
+
+server.on('upgrade', (request, socket, head) => {
+    const query = url.parse(request.url ?? '', true).query;
+    const ticket = Array.isArray(query.ticket) ? query.ticket[0] : query.ticket;
+    const payload = verifyRealtimeTicket(ticket, process.env.REALTIME_AUTH_SECRET);
+    if (!payload) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+    }
+    authenticatedRequests.set(request, payload.userId);
+    wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
+});
 
 wss.on("connection", async (ws, request) => {
     console.log("Client connected!");
-    
-    const query = url.parse(request.url ?? '', true).query;
-    const userId = query.userId;
 
-    if (!userId) {
-        console.log('No user ID found in cookies');
-        ws.close();
-        return;
-    }
-    else {
-        console.log(userId)
-    }
+    const userId = authenticatedRequests.get(request);
+    if (!userId) return ws.close();
+    console.log(`Authenticated client ${userId}`);
 
     // Mark user online in Redis with 60-second TTL (will auto-expire if no heartbeat)
     await redis.set(`online:${userId}`, Date.now().toString(), {
@@ -114,9 +122,11 @@ wss.on("connection", async (ws, request) => {
 
 // Subscribe to Redis
 redisSub.subscribe("annotations");
+redisSub.subscribe("annotationUpdates");
 redisSub.subscribe("bookmarks");
 redisSub.subscribe("comments");
 redisSub.subscribe("likes")
+redisSub.subscribe("commentLikes")
 
 redisSub.on("message", (channel, message) => {
     console.log(`Message from Redis on channel '${channel}': ${message}`);
